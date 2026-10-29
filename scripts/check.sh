@@ -57,7 +57,7 @@ verify python -m scripts.verify outage check publisher-outage
 compose stop rabbitmq
 verify python -m scripts.verify outage prepare broker-outage
 verify python -m scripts.verify outage pending broker-outage
-compose start --wait rabbitmq
+compose up -d --wait rabbitmq
 verify python -m scripts.verify outage check broker-outage
 
 compose stop consumer
