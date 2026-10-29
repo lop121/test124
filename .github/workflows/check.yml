@@ -1,0 +1,14 @@
+name: Checks
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify migrations, lint, tests and Docker scenarios
+        run: ./scripts/check.sh

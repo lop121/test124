@@ -1,0 +1,143 @@
+name: payment-processing
+
+x-app: &app
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  init: true
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    rabbitmq:
+      condition: service_healthy
+    broker-setup:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Copy .env.example to .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4.2-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Set RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}
+    ports:
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15673}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  broker-setup:
+    build: .
+    env_file: .env
+    command: [python, -m, src.broker_setup]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  migrate:
+    build: .
+    env_file: .env
+    command: [alembic, upgrade, head]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "127.0.0.1:${API_PORT:-18080}:8000"
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; r=urllib.request.Request('http://localhost:8000/health',headers={'X-API-Key':os.environ['API_KEY']}); urllib.request.urlopen(r,timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  consumer:
+    <<: *app
+    command: [python, -m, src.consumer]
+    stop_grace_period: 30s
+
+  outbox:
+    <<: *app
+    command: [python, -m, src.outbox]
+
+  demo-webhook:
+    image: python:3.12-slim
+    profiles: [demo]
+    volumes:
+      - ./scripts/demo_webhook.py:/app/demo_webhook.py:ro
+    working_dir: /app
+    command: [python, demo_webhook.py]
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET}
+
+  test-postgres:
+    image: postgres:17-alpine
+    profiles: [test]
+    environment:
+      POSTGRES_USER: tests
+      POSTGRES_PASSWORD: tests-local-only
+      POSTGRES_DB: payments_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -U, tests, -d, payments_test]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  tests:
+    build:
+      context: .
+      target: test
+    profiles: [test]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tests:tests-local-only@test-postgres:5432/payments_test
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+
+  verify:
+    build:
+      context: .
+      target: test
+    profiles: [verify]
+    env_file: .env
+    environment:
+      API_BASE_URL: http://api:8000
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: [python, -m, scripts.verify]
+    depends_on:
+      api:
+        condition: service_healthy
+      consumer:
+        condition: service_started
+      outbox:
+        condition: service_started
+      demo-webhook:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
